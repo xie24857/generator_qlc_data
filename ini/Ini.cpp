@@ -1,4 +1,4 @@
-#include "IniConfig.h"
+#include "ini/Ini.h"
 
 #include <algorithm>
 #include <cctype>
@@ -7,22 +7,23 @@
 #include <set>
 #include <sstream>
 
-// ---- 工厂方法 ----
+Ini& Ini::instance()
+{
+    static Ini config;
+    return config;
+}
 
-IniConfig IniConfig::fromFile(const std::string& filename)
+void Ini::loadFile(const std::string& filename)
 {
     std::ifstream file(filename);
     if (!file.is_open())
         throw std::runtime_error("无法打开文件: " + filename);
-
-    IniConfig config;
-    config.parse(file);
-    return config;
+    values.clear();
+    parse(file);
 }
-
 // ---- 解析核心 ----
 
-void IniConfig::parse(std::istream& input)
+void Ini::parse(std::istream& input)
 {
     std::string line;
     std::string section;
@@ -100,12 +101,12 @@ void IniConfig::parse(std::istream& input)
 
 // ---- 字符串工具 ----
 
-std::string IniConfig::trim(const std::string& s)
+std::string Ini::trim(const std::string& s)
 {
     return ltrim(rtrim(s));
 }
 
-std::string IniConfig::ltrim(const std::string& s)
+std::string Ini::ltrim(const std::string& s)
 {
     std::size_t start = 0;
     while (start < s.size() && std::isspace(static_cast<unsigned char>(s[start])))
@@ -113,7 +114,7 @@ std::string IniConfig::ltrim(const std::string& s)
     return s.substr(start);
 }
 
-std::string IniConfig::rtrim(const std::string& s)
+std::string Ini::rtrim(const std::string& s)
 {
     std::size_t end = s.size();
     while (end > 0 && std::isspace(static_cast<unsigned char>(s[end - 1])))
@@ -121,7 +122,7 @@ std::string IniConfig::rtrim(const std::string& s)
     return s.substr(0, end);
 }
 
-std::string IniConfig::stripInlineComment(const std::string& s)
+std::string Ini::stripInlineComment(const std::string& s)
 {
     // 行内注释：; 前面必须有空白
     bool prevSpace = false;
@@ -133,7 +134,7 @@ std::string IniConfig::stripInlineComment(const std::string& s)
     return s;
 }
 
-std::string IniConfig::toLower(const std::string& s)
+std::string Ini::toLower(const std::string& s)
 {
     std::string result = s;
     std::transform(result.begin(), result.end(), result.begin(),
@@ -141,14 +142,14 @@ std::string IniConfig::toLower(const std::string& s)
     return result;
 }
 
-std::string IniConfig::makeKey(const std::string& section, const std::string& name)
+std::string Ini::makeKey(const std::string& section, const std::string& name)
 {
     return toLower(section) + "=" + toLower(name);
 }
 
 // ---- 取值方法 ----
 
-std::pair<bool, std::string> IniConfig::getString(const std::string& section,
+std::pair<bool, std::string> Ini::getString(const std::string& section,
                                                    const std::string& name) const
 {
     auto it = values.find(makeKey(section, name));
@@ -157,7 +158,7 @@ std::pair<bool, std::string> IniConfig::getString(const std::string& section,
     return std::make_pair(false, std::string());
 }
 
-std::pair<bool, long> IniConfig::getInt(const std::string& section,
+std::pair<bool, long> Ini::getInt(const std::string& section,
                                          const std::string& name) const
 {
     auto str = getString(section, name);
@@ -171,7 +172,7 @@ std::pair<bool, long> IniConfig::getInt(const std::string& section,
     return std::make_pair(true, n);
 }
 
-std::pair<bool, double> IniConfig::getDouble(const std::string& section,
+std::pair<bool, double> Ini::getDouble(const std::string& section,
                                               const std::string& name) const
 {
     auto str = getString(section, name);
@@ -185,7 +186,7 @@ std::pair<bool, double> IniConfig::getDouble(const std::string& section,
     return std::make_pair(true, n);
 }
 
-std::pair<bool, bool> IniConfig::getBool(const std::string& section,
+std::pair<bool, bool> Ini::getBool(const std::string& section,
                                           const std::string& name) const
 {
     auto str = getString(section, name);
@@ -200,43 +201,21 @@ std::pair<bool, bool> IniConfig::getBool(const std::string& section,
     return std::make_pair(false, false);
 }
 
-std::pair<bool, std::vector<long>> IniConfig::getIntList(const std::string& section,
-                                                          const std::string& name) const
-{
-    auto str = getString(section, name);
-    if (!str.first)
-        return std::make_pair(false, std::vector<long>());
-
-    std::vector<long> result;
-    std::istringstream ss(str.second);
-    std::string token;
-
-    while (std::getline(ss, token, ',')) {
-        char* end;
-        long n = std::strtol(token.c_str(), &end, 0);
-        if (end == token.c_str())
-            return std::make_pair(false, std::vector<long>());
-        result.push_back(n);
-    }
-
-    return std::make_pair(true, result);
-}
-
 // ---- 查询方法 ----
 
-bool IniConfig::hasSection(const std::string& section) const
+bool Ini::hasSection(const std::string& section) const
 {
     std::string prefix = makeKey(section, "");
     auto it = values.lower_bound(prefix);
     return it != values.end() && it->first.compare(0, prefix.size(), prefix) == 0;
 }
 
-bool IniConfig::hasKey(const std::string& section, const std::string& name) const
+bool Ini::hasKey(const std::string& section, const std::string& name) const
 {
     return values.find(makeKey(section, name)) != values.end();
 }
 
-std::vector<std::string> IniConfig::sections() const
+std::vector<std::string> Ini::sections() const
 {
     std::set<std::string> result;
     for (const auto& pair : values) {
@@ -247,7 +226,7 @@ std::vector<std::string> IniConfig::sections() const
     return std::vector<std::string>(result.begin(), result.end());
 }
 
-std::vector<std::string> IniConfig::keys(const std::string& section) const
+std::vector<std::string> Ini::keys(const std::string& section) const
 {
     std::vector<std::string> result;
     std::string prefix = makeKey(section, "");

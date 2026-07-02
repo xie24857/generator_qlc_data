@@ -1,5 +1,5 @@
-#ifndef INI_CONFIG_H
-#define INI_CONFIG_H
+#ifndef INI_H
+#define INI_H
 
 #include <string>
 #include <map>
@@ -9,14 +9,14 @@
 
 /// INI 配置文件解析器
 /// 用法：
-///   auto config = IniConfig::fromFile("config.ini");
+///   auto config = Ini::fromFile("config.ini");
 ///   auto result = config.getString("user", "name");
 ///   if (result.first) { /* 找到了，值是 result.second */ }
-class IniConfig
+class Ini
 {
 public:
-    /// 从文件加载，解析失败抛 std::runtime_error
-    static IniConfig fromFile(const std::string& filename);
+    static Ini& instance();
+    void loadFile(const std::string& filename);
 
     /// 获取字符串值，first=是否找到，second=值
     std::pair<bool, std::string> getString(const std::string& section,
@@ -46,10 +46,8 @@ public:
     /// 获取某个 section 下所有 key
     std::vector<std::string> keys(const std::string& section) const;
 
-    std::pair<bool, std::vector<long>> getIntList(const std::string& section,
-                                               const std::string& name) const;
 private:
-    IniConfig() = default;
+    Ini() = default;
 
     std::map<std::string, std::string> values;
 
@@ -75,4 +73,4 @@ private:
     static std::string toLower(const std::string& s);
 };
 
-#endif // INI_CONFIG_H
+#endif // INI_H
