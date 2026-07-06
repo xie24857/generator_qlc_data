@@ -2,42 +2,68 @@
 #include "ini/Ini.h"
 #include "logger/Logger.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <ctime>
 #include <functional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 
 Config g_config;
 
 // ============================================================
-//  辅助：生成文件名
+//  辅助：解析 "[a,b],[c,d]" 格式的区间列表
 // ============================================================
-static std::string generateFilename(const StrategyConfig& strategy)
+static std::vector<std::pair<size_t, size_t>> parseRegion(const std::string& s)
 {
-    std::string name = strategy.mode;
-    for (const auto& p : strategy.state_values) {
-        name += "_" + std::to_string(p.first) + "-" + std::to_string(p.second);
-    }
+    std::vector<std::pair<size_t, size_t>> ranges;
+    size_t i = 0;
+    while (i < s.size()) {
+        while (i < s.size() && s[i] != '[') i++;
+        if (i >= s.size()) break;
+        i++;
 
-    // Linux 文件名上限 255 字节，预留 .bin 和 hash 的空间
-    const size_t MAX_BASE_LEN = 240;
-    if (name.size() > MAX_BASE_LEN) {
-        std::size_t h = std::hash<std::string>()(name);
-        std::string hash_str = std::to_string(h);
-        name = name.substr(0, MAX_BASE_LEN - hash_str.size() - 1) + "_" + hash_str;
-    }
+        char* end;
+        long start = std::strtol(s.c_str() + i, &end, 10);
+        if (end == s.c_str() + i)
+            throw std::runtime_error("region 解析失败，期望数字: " + s);
+        i = end - s.c_str();
 
-    return name + ".bin";
+        while (i < s.size() && (s[i] == ',' || s[i] == ' ')) i++;
+
+        long range_end = std::strtol(s.c_str() + i, &end, 10);
+        if (end == s.c_str() + i)
+            throw std::runtime_error("region 解析失败，期望数字: " + s);
+        i = end - s.c_str();
+
+        while (i < s.size() && s[i] != ']') i++;
+        if (i < s.size()) i++;
+
+        if (start > range_end)
+            throw std::runtime_error("region 区间逆序: [" +
+                std::to_string(start) + "," + std::to_string(range_end) + "]");
+        ranges.push_back({static_cast<size_t>(start), static_cast<size_t>(range_end)});
+    }
+    return ranges;
 }
+
+// 合法 cell type 前缀、状态数、每 cell 比特数
+static const struct { const char* prefix; int stateCount; int bitsPerCell; } kCellTypes[] = {
+    {"qlc", 16, 4},
+    {"tlc",  8, 3},
+    {"mlc",  4, 2},
+    {"slc",  2, 1},
+};
 
 // ============================================================
 //  loadLogger
 // ============================================================
-static void loadLogger(LoggerConfig& cfg)
+static void loadLogger()
 {
-    Ini&    ini = Ini::instance();
+    Ini& ini = Ini::instance();
     Logger& log = Logger::instance();
 
     // level
@@ -56,8 +82,6 @@ static void loadLogger(LoggerConfig& cfg)
         else if (s == "ERROR") log.set_level(Logger::ERROR);
         else if (s == "FATAL") log.set_level(Logger::FATAL);
         else throw std::runtime_error("[logger] level 非法值: " + r.second);
-
-        cfg.level = s;
     }
 
     // quiet
@@ -65,7 +89,6 @@ static void loadLogger(LoggerConfig& cfg)
         auto r = ini.getBool("logger", "quiet");
         if (!r.first) throw std::runtime_error("缺少 [logger] quiet");
         log.set_quiet(r.second);
-        cfg.quiet = r.second;
     }
 
     // thread_safe
@@ -73,7 +96,6 @@ static void loadLogger(LoggerConfig& cfg)
         auto r = ini.getBool("logger", "thread_safe");
         if (!r.first) throw std::runtime_error("缺少 [logger] thread_safe");
         log.set_thread_safe(r.second);
-        cfg.thread_safe = r.second;
     }
 
     // color
@@ -81,134 +103,249 @@ static void loadLogger(LoggerConfig& cfg)
         auto r = ini.getBool("logger", "color");
         if (!r.first) throw std::runtime_error("缺少 [logger] color");
         log.set_color(r.second);
-        cfg.color = r.second;
     }
 }
 
 // ============================================================
-//  loadFlash
+//  loadThreading
 // ============================================================
-static void loadFlash(FlashConfig& cfg)
+static void loadThreading(ThreadingConfig& th)
 {
-    Ini& ini = Ini::instance();
+    auto r = Ini::instance().getInt("threading", "thread_count");
+    if (!r.first)
+        throw std::runtime_error("缺少 [threading] thread_count");
 
-    // page_count_in_block
-    {
-        auto r = ini.getInt("flash", "page_count_in_block");
-        if (!r.first)
-            throw std::runtime_error("缺少 [flash] page_count_in_block");
-        cfg.page_count_in_block = static_cast<size_t>(r.second);
-        if (cfg.page_count_in_block % 4 != 0)
-            throw std::runtime_error("page_count_in_block 必须是 4 的倍数");
+    int val = static_cast<int>(r.second);
+    if (val == 0) {
+        th.threadCount = 0;
+        return;
     }
 
-    // page_size
-    {
-        auto r = ini.getInt("flash", "page_size");
-        if (!r.first)
-            throw std::runtime_error("缺少 [flash] page_size");
-        cfg.page_size = static_cast<size_t>(r.second);
-    }
+    int nproc = static_cast<int>(std::thread::hardware_concurrency());
+    if (nproc <= 0) nproc = 0;
+    int maxThreads = (nproc > 0) ? nproc * 2 : 64;
 
-    // encoding
-    {
-        auto str = ini.getString("flash", "encoding");
-        if (!str.first)
-            throw std::runtime_error("缺少 [flash] encoding");
+    if (val < 1 || val > maxThreads)
+        throw std::runtime_error(
+            "[threading] thread_count 超出范围 [1, " + std::to_string(maxThreads)
+            + "] (0=关闭): " + std::to_string(val));
 
-        // 本地解析逗号分隔的整数列表
-        std::vector<long> enc_values;
-        std::istringstream ss(str.second);
-        std::string token;
-        while (std::getline(ss, token, ',')) {
-            char* end;
-            long n = std::strtol(token.c_str(), &end, 0);
-            if (end == token.c_str())
-                throw std::runtime_error("encoding 含非法值: " + token);
-            enc_values.push_back(n);
-        }
-
-        if (enc_values.size() != 16)
-            throw std::runtime_error("encoding 必须恰好 16 个值");
-
-        // 校验是 0-15 的排列（每个值出现恰好一次）
-        std::vector<bool> seen(16, false);
-        for (long v : enc_values) {
-            if (v < 0 || v > 15)
-                throw std::runtime_error("encoding 值必须在 0-15 范围内: " + std::to_string(v));
-            if (seen[v])
-                throw std::runtime_error("encoding 中有重复值: " + std::to_string(v));
-            seen[v] = true;
-        }
-
-        for (long v : enc_values)
-            cfg.encoding.push_back(static_cast<int>(v));
-
-        // 校验格雷码：相邻状态的编码只差 1 bit
-        for (int i = 0; i < 15; i++) {
-            int diff = cfg.encoding[i] ^ cfg.encoding[i + 1];
-            if (diff == 0 || (diff & (diff - 1)) != 0)
-                throw std::runtime_error("encoding 不是有效格雷码: 状态 " +
-                    std::to_string(i) + " 和 " + std::to_string(i + 1) +
-                    " 的编码差异不是 1 bit");
-        }
-    }
-}
-
-// ============================================================
-//  loadStrategy
-// ============================================================
-static void loadStrategy(StrategyConfig& cfg, const FlashConfig& flash)
-{
-    Ini& ini = Ini::instance();
-
-    // mode
-    {
-        auto r = ini.getString("strategy", "mode");
-        if (!r.first)
-            throw std::runtime_error("缺少 [strategy] mode");
-        cfg.mode = r.second;
-        if (cfg.mode != "ratio" && cfg.mode != "count")
-            throw std::runtime_error("strategy.mode 必须是 ratio 或 count");
-    }
-
-    // 读取 0-15 的值
-    for (int i = 0; i <= 15; i++) {
-        auto val = ini.getInt("strategy", std::to_string(i));
-        if (!val.first)
-            throw std::runtime_error("缺少 [strategy] " + std::to_string(i));
-        if (val.second < 0)
-            throw std::runtime_error("strategy." + std::to_string(i) + " 不能为负数");
-        if (val.second > 0)
-            cfg.state_values[i] = static_cast<size_t>(val.second);
-    }
-    if (cfg.state_values.empty())
-        throw std::runtime_error("至少需要一个非零状态");
-
-    // count 模式校验总和
-    if (cfg.mode == "count") {
-        size_t total = 0;
-        for (const auto& p : cfg.state_values)
-            total += p.second;
-        size_t expected = flash.page_size * 8;
-        if (total != expected)
-            throw std::runtime_error("count 模式总和 " + std::to_string(total) +
-                                     " 不等于 page_size*8=" + std::to_string(expected));
-    }
+    th.threadCount = val;
 }
 
 // ============================================================
 //  loadOutput
 // ============================================================
-static void loadOutput(std::string& filename, const StrategyConfig& strategy)
+static void loadOutput(std::string& filename, const DeviceConfig& device)
 {
     Ini& ini = Ini::instance();
 
     auto fname = ini.getString("output", "filename");
-    if (fname.first && !fname.second.empty())
+    if (fname.first && !fname.second.empty()) {
         filename = fname.second;
-    else
-        filename = generateFilename(strategy);
+    } else {
+        std::time_t now = std::time(nullptr);
+        char buf[32];
+        std::strftime(buf, sizeof(buf), "%m%d_%H%M%S", std::localtime(&now));
+        filename = std::string(buf) + "_" + device.cell_type + ".bin";
+    }
+}
+
+// ============================================================
+//  loadDevice
+// ============================================================
+static void loadDevice(DeviceConfig& cfg)
+{
+    Ini& ini = Ini::instance();
+
+    // cell_type
+    {
+        auto r = ini.getString("device", "cell_type");
+        if (!r.first)
+            throw std::runtime_error("缺少 [device] cell_type");
+        cfg.cell_type = r.second;
+        std::string ct = cfg.cell_type;
+        for (char& c : ct)
+            c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        if (ct != "QLC" && ct != "TLC" && ct != "MLC" && ct != "SLC")
+            throw std::runtime_error("[device] cell_type 非法值: " + r.second +
+                "（支持 QLC/TLC/MLC/SLC）");
+        cfg.cell_type = ct;
+    }
+
+    // page_count_in_block：须为 cell_type 每 cell 比特数的倍数
+    {
+        auto r = ini.getInt("device", "page_count_in_block");
+        if (!r.first)
+            throw std::runtime_error("缺少 [device] page_count_in_block");
+        cfg.page_count_in_block = static_cast<size_t>(r.second);
+
+        int bitsPerCell = 0;
+        for (const auto& ct : kCellTypes) {
+            if (ct.prefix == cfg.cell_type) {
+                bitsPerCell = ct.bitsPerCell;
+                break;
+            }
+        }
+        if (bitsPerCell > 0 && cfg.page_count_in_block % bitsPerCell != 0)
+            throw std::runtime_error("[device] page_count_in_block 必须是 " +
+                std::to_string(bitsPerCell) + " 的倍数（" + cfg.cell_type + " 每 cell " +
+                std::to_string(bitsPerCell) + " bit）");
+    }
+
+    // page_size
+    {
+        auto r = ini.getInt("device", "page_size");
+        if (!r.first)
+            throw std::runtime_error("缺少 [device] page_size");
+        cfg.page_size = static_cast<size_t>(r.second);
+    }
+
+    // wordline_count
+    {
+        auto r = ini.getInt("device", "wordline_count");
+        if (!r.first)
+            throw std::runtime_error("缺少 [device] wordline_count");
+        cfg.wordline_count = static_cast<size_t>(r.second);
+    }
+
+    // 各 cell type 的字段须同时存在或同时不存在
+    // 先探测哪些 cell type 已配置，再统一加载
+    for (const auto& ct : kCellTypes) {
+        bool hasEncoding = ini.getString("device", std::string(ct.prefix) + "_encoding").first;
+        bool hasRegion   = ini.getString("device", std::string(ct.prefix) + "_region").first;
+        bool hasMode     = ini.getString("device", std::string(ct.prefix) + "_mode").first;
+
+        // 任一字段存在则全部必须存在
+        if (hasEncoding || hasRegion || hasMode) {
+            if (!hasEncoding)
+                throw std::runtime_error("[device] " + std::string(ct.prefix) +
+                    " 字段不完整：缺少 " + std::string(ct.prefix) + "_encoding（encoding/region/mode 须同时存在）");
+            if (!hasRegion)
+                throw std::runtime_error("[device] " + std::string(ct.prefix) +
+                    " 字段不完整：缺少 " + std::string(ct.prefix) + "_region（encoding/region/mode 须同时存在）");
+            if (!hasMode)
+                throw std::runtime_error("[device] " + std::string(ct.prefix) +
+                    " 字段不完整：缺少 " + std::string(ct.prefix) + "_mode（encoding/region/mode 须同时存在）");
+        } else {
+            continue;  // 全部不存在，跳过
+        }
+
+        // ---- encoding ----
+        {
+            std::string key = std::string(ct.prefix) + "_encoding";
+            auto str = ini.getString("device", key);
+
+            // 逗号替换为空格，再用 >> 直接读取
+            std::string s = str.second;
+            for (char& c : s)
+                if (c == ',') c = ' ';
+
+            std::vector<int> enc_values;
+            std::istringstream ss(s);
+            int n;
+            while (ss >> n)
+                enc_values.push_back(n);
+
+            if (ss.fail() && !ss.eof())
+                throw std::runtime_error(key + " 含非法值: " + str.second);
+
+            if (enc_values.size() != static_cast<size_t>(ct.stateCount))
+                throw std::runtime_error(key + " 必须恰好 " +
+                    std::to_string(ct.stateCount) + " 个值");
+
+            std::vector<bool> seen(ct.stateCount, false);
+            for (int v : enc_values) {
+                if (v < 0 || v >= ct.stateCount)
+                    throw std::runtime_error(key + " 值必须在 0-" +
+                        std::to_string(ct.stateCount - 1) + " 范围内: " + std::to_string(v));
+                if (seen[v])
+                    throw std::runtime_error(key + " 中有重复值: " + std::to_string(v));
+                seen[v] = true;
+            }
+
+            std::vector<int> encoding = enc_values;
+
+            for (int i = 0; i < ct.stateCount - 1; i++) {
+                int diff = encoding[i] ^ encoding[i + 1];
+                if (diff == 0 || (diff & (diff - 1)) != 0)
+                    throw std::runtime_error(key + " 不是有效格雷码: 状态 " +
+                        std::to_string(i) + " 和 " + std::to_string(i + 1) +
+                        " 的编码差异不是 1 bit");
+            }
+
+            cfg.encodings[ct.prefix] = encoding;
+        }
+
+        // ---- region ----
+        {
+            std::string key = std::string(ct.prefix) + "_region";
+            auto str = ini.getString("device", key);
+            cfg.wl_ranges[ct.prefix] = parseRegion(str.second);
+        }
+
+        // ---- strategy (mode + state_0..N) ----
+        {
+            std::string modeKey = std::string(ct.prefix) + "_mode";
+            auto modeR = ini.getString("device", modeKey);
+
+            DeviceConfig::TypeStrategy cts;
+            cts.mode = modeR.second;
+            if (cts.mode != "ratio" && cts.mode != "count")
+                throw std::runtime_error("[device] " + modeKey + " 非法值: " + modeR.second +
+                    "（应为 ratio 或 count）");
+
+            for (int i = 0; i < ct.stateCount; ++i) {
+                std::string key = std::string(ct.prefix) + "_" + std::to_string(i);
+                auto val = ini.getInt("device", key);
+                if (!val.first)
+                    throw std::runtime_error("[device] 缺少 " + key);
+                if (val.second < 0)
+                    throw std::runtime_error("[device] " + key + " 不能为负数");
+                if (val.second > 0)
+                    cts.state_values[i] = static_cast<size_t>(val.second);
+            }
+            if (cts.state_values.empty())
+                throw std::runtime_error("[device] " + std::string(ct.prefix) + " 至少需要一个非零状态");
+
+            if (cts.mode == "count") {
+                size_t total = 0;
+                for (const auto& p : cts.state_values)
+                    total += p.second;
+                size_t expected = cfg.page_size * 8;
+                if (total != expected)
+                    throw std::runtime_error("[device] " + std::string(ct.prefix) +
+                        " count 总和 " + std::to_string(total) +
+                        " 不等于 page_size*8=" + std::to_string(expected));
+            }
+
+            cfg.strategies[ct.prefix] = std::move(cts);
+        }
+    }
+
+    // 校验 WL 范围全覆盖无重叠
+    {
+        std::vector<std::pair<size_t, size_t>> all_ranges;
+        for (const auto& kv : cfg.wl_ranges)
+            for (const auto& r : kv.second)
+                all_ranges.push_back(r);
+        std::sort(all_ranges.begin(), all_ranges.end());
+
+        size_t expected_end = cfg.wordline_count;
+        size_t cursor = 0;
+        for (const auto& r : all_ranges) {
+            if (r.first > cursor)
+                throw std::runtime_error("WL 范围有空隙: [" + std::to_string(cursor) +
+                    "," + std::to_string(r.first - 1) + "] 未被覆盖");
+            if (r.first < cursor)
+                throw std::runtime_error("WL 范围重叠: [" + std::to_string(r.first) +
+                    "," + std::to_string(r.second) + "]");
+            cursor = std::max(cursor, r.second + 1);
+        }
+        if (cursor != expected_end)
+            throw std::runtime_error("WL 范围未覆盖到 wordline_count: 最后覆盖到 " +
+                std::to_string(cursor - 1) + "，需要覆盖到 " + std::to_string(expected_end - 1));
+    }
 }
 
 // ============================================================
@@ -217,8 +354,8 @@ static void loadOutput(std::string& filename, const StrategyConfig& strategy)
 
 void Config::load()
 {
-    loadLogger(logger);
-    loadFlash(flash);
-    loadStrategy(strategy, flash);
-    loadOutput(filename, strategy);
+    loadLogger();
+    loadDevice(device);
+    loadThreading(threading);
+    loadOutput(filename, device);
 }
