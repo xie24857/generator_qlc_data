@@ -10,6 +10,9 @@ add_executable(generator
     ini/Ini.cpp
     logger/Logger.cpp
     config/Config.cpp
+    algo/QuotaShuffleGenerator.cpp
+    algo/PageProcessor.cpp
+    algo/BlockGenerator.cpp
 )
 
 target_include_directories(generator PRIVATE
