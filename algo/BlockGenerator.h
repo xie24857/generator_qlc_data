@@ -29,12 +29,14 @@ private:
     struct CellTypeGenerator {
         int bitsPerCell;
         std::map<int, size_t> wl_state_counts;  // 每个 WL 各状态的 cell 数量
+        std::string              position_mode;  // "none" / "parity" / "half"
+        std::string              parity_map;     // "default" / "swap"
         std::unique_ptr<BaseGenerator> cell_pool;
     };
 
-    // 计算每个 WordLine 中各状态的数量
+    // 计算每个 WordLine 中各状态的数量（position_mode 非 none 时等量）
     std::map<int, size_t> buildStateCounts(
-        const DeviceConfig::TypeStrategy& strategy);
+        const DeviceConfig::TypeStrategy& strategy, size_t num_states);
 
     const DeviceConfig& device;
     size_t cells_per_wl;

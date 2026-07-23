@@ -11,8 +11,10 @@
 struct DeviceConfig {
     // 单种 cell type 的策略（QLC/TLC/MLC/SLC 共用结构）
     struct TypeStrategy {
-        std::string              mode;          // "ratio" 或 "count"
-        std::map<int, size_t>    state_values;  // state -> 权重或数量（仅非零项）
+        std::string              mode;           // "ratio" 或 "count"
+        std::map<int, size_t>    state_values;   // state -> 权重或数量（仅非零项）
+        std::string              position_mode;  // "none"(默认) / "parity" / "half"
+        std::string              parity_map;     // "default" / "swap"（position_mode 非 none 时有效）
     };
 
     std::string                        cell_type;        // QLC / TLC / MLC / SLC

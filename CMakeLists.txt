@@ -11,6 +11,7 @@ add_executable(generator
     logger/Logger.cpp
     config/Config.cpp
     algo/QuotaShuffleGenerator.cpp
+    algo/DualPoolGenerator.cpp
     algo/PageProcessor.cpp
     algo/BlockGenerator.cpp
 )

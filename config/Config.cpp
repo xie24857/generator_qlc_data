@@ -319,6 +319,28 @@ static void loadDevice(DeviceConfig& cfg)
                         " 不等于 page_size*8=" + std::to_string(expected));
             }
 
+            // position_mode（可选，默认 none）
+            {
+                std::string key = std::string(ct.prefix) + "_position_mode";
+                auto r = ini.getString("device", key);
+                cts.position_mode = r.first ? r.second : "none";
+                if (cts.position_mode != "none"
+                    && cts.position_mode != "parity"
+                    && cts.position_mode != "half")
+                    throw std::runtime_error("[device] " + key + " 非法值: " +
+                        cts.position_mode + "（应为 none/parity/half）");
+            }
+
+            // parity_map（可选，默认 default）
+            {
+                std::string key = std::string(ct.prefix) + "_parity_map";
+                auto r = ini.getString("device", key);
+                cts.parity_map = r.first ? r.second : "default";
+                if (cts.parity_map != "default" && cts.parity_map != "swap")
+                    throw std::runtime_error("[device] " + key + " 非法值: " +
+                        cts.parity_map + "（应为 default/swap）");
+            }
+
             cfg.strategies[ct.prefix] = std::move(cts);
         }
     }
