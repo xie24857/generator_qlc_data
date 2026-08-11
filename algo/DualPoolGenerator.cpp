@@ -9,7 +9,7 @@ DualPoolGenerator::DualPoolGenerator(
     const std::vector<int>& encoding,
     Mode mode,
     Map map)
-    : mode(mode), cells_per_wl(0)
+    : cells_per_wl(0), mode(mode)
 {
     // 按 key 奇偶拆分
     std::map<int, size_t> even_keys, odd_keys;
@@ -45,7 +45,7 @@ int DualPoolGenerator::next() {
             ? pool_first->next()
             : pool_second->next();
     } else {
-        val = (static_cast<size_t>(cell_pos) < static_cast<size_t>(cells_per_wl) / 2)
+        val = (cell_pos < cells_per_wl / 2)
             ? pool_first->next()
             : pool_second->next();
     }

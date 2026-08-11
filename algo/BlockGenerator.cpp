@@ -93,6 +93,9 @@ BlockGenerator::BlockGenerator(const DeviceConfig& device_cfg, size_t cells_per_
         if (strategy.position_mode == "none") {
             ctg.cell_pool.reset(new QuotaShuffleGenerator(ctg.wl_state_counts, encoding));
         } else {
+            log_warn("[%s] position_mode=%s 生效：忽略 %s 模式配置的各状态数量，改用等量分配（每状态 %zu cells）",
+                     cell_type.c_str(), strategy.position_mode.c_str(),
+                     strategy.mode.c_str(), cells_per_wl / num_states);
             DualPoolGenerator::Mode mode = (strategy.position_mode == "parity")
                 ? DualPoolGenerator::Mode::PARITY
                 : DualPoolGenerator::Mode::HALF;
@@ -156,10 +159,15 @@ void BlockGenerator::printInfo() const {
                 const char* pool_name = is_first ? first_name : second_name;
                 int n = snprintf(buf, sizeof(buf), "[%s] 池%d(%s) 状态:",
                                  cell_type.c_str(), pool_idx + 1, pool_name);
+                if (n < 0 || n >= static_cast<int>(sizeof(buf))) n = sizeof(buf) - 1;
                 for (int i = 0; i < num_states; ++i)
-                    if ((i % 2 == 0) == pool_even)
-                        n += snprintf(buf + n, sizeof(buf) - n, " %d", i);
-                n += snprintf(buf + n, sizeof(buf) - n, "  每状态 %zu cells", per_state);
+                    if ((i % 2 == 0) == pool_even) {
+                        int w = snprintf(buf + n, sizeof(buf) - n, " %d", i);
+                        if (w < 0) break;
+                        n += w;
+                        if (n >= static_cast<int>(sizeof(buf))) { n = sizeof(buf) - 1; break; }
+                    }
+                snprintf(buf + n, sizeof(buf) - n, "  每状态 %zu cells", per_state);
                 log_info("%s", buf);
             }
         }

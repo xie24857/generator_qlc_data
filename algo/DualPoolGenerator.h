@@ -3,6 +3,7 @@
 
 #include "algo/BaseGenerator.h"
 
+#include <cstddef>
 #include <map>
 #include <memory>
 #include <vector>
@@ -28,7 +29,7 @@ public:
 private:
     std::unique_ptr<BaseGenerator> pool_first;
     std::unique_ptr<BaseGenerator> pool_second;
-    int cells_per_wl;
+    size_t cells_per_wl;
     Mode mode;
     size_t cell_pos = 0;
 };
